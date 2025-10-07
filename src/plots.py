@@ -253,10 +253,20 @@ if 'df' in locals() and df is not None:
                     # Круговая диаграмма по месяцам
                     if not df_filtered.empty and pd.notna(df_filtered['date']).any():
                         df_filtered['month'] = df_filtered['date'].dt.month
-                        monthly_counts = df_filtered['month'].value_counts().sort_index()
+                        monthly_counts = df_filtered['month'].value_counts().sort_index()  # Сортировка по месяцам: 1, 2, ..., 12
+
                         if not monthly_counts.empty:
-                            fig2 = px.pie(values=monthly_counts.values, names=monthly_counts.index,
-                                        title='Распределение патентов по месяцам')
+                            fig2 = px.pie(
+                                values=monthly_counts.values,
+                                names=monthly_counts.index,
+                                title='Распределение патентов по месяцам',
+                                category_orders={"names": list(monthly_counts.index)}  # Фиксируем порядок
+                            )
+                            fig2.update_layout(
+                                legend=dict(
+                                    traceorder="normal"  # Убедимся, что легенда идёт в том же порядке, что и данные
+                                )
+                            )
                             st.plotly_chart(fig2, use_container_width=True)
                 
                 with col2:

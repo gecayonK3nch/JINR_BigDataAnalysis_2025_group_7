@@ -12,7 +12,7 @@ from matplotlib.patches import Rectangle
 from scipy.stats import linregress
 
 # Загрузка данных из файла
-df = pd.read_csv('patents_exp.csv')
+df = pd.read_csv('patents.csv')
 print(df.info())
 
 # Функция для извлечения авторов

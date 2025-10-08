@@ -8,6 +8,19 @@ import plotly.graph_objects as go
 from collections import Counter
 import re
 import io
+from pathlib import Path
+
+# Справочник разделов по кодировке (IPC)
+CODIFIER_MAP = {
+    'A': 'УДОВЛЕТВОРЕНИЕ ЖИЗНЕННЫХ ПОТРЕБНОСТЕЙ ЧЕЛОВЕКА',
+    'B': 'РАЗЛИЧНЫЕ ТЕХНОЛОГИЧЕСКИЕ ПРОЦЕССЫ; ТРАНСПОРТИРОВАНИЕ',
+    'C': 'ХИМИЯ; МЕТАЛЛУРГИЯ',
+    'D': 'ТЕКСТИЛЬ; БУМАГА',
+    'E': 'СТРОИТЕЛЬСТВО И ГОРНОЕ ДЕЛО',
+    'F': 'МАШИНОСТРОЕНИЕ; ОСВЕЩЕНИЕ; ОТОПЛЕНИЕ; ОРУЖИЕ И БОЕПРИПАСЫ; ВЗРЫВНЫЕ РАБОТЫ',
+    'G': 'ФИЗИКА',
+    'H': 'ЭЛЕКТРИЧЕСТВО',
+}
 
 # Настройка страницы
 st.set_page_config(
@@ -58,42 +71,62 @@ def load_data(uploaded_file):
         st.error(f"Ошибка при загрузке файла: {e}")
         return None
 
-# Функция для обработки данных
+# Функция для обработки данных (без нормализации столбцов)
 def process_data(df):
     # Очистка данных
     df = df.dropna(how='all')
-    
-    # Преобразование дат
-    df['date'] = pd.to_datetime(df['date'], format='%d.%m.%Y', errors='coerce')
-    
-    # Извлечение даты публикации
-    df['publication_date'] = df['publication'].astype(str).str.extract(r'(\d{2}\.\d{2}\.\d{4})')
-    df['publication_date'] = pd.to_datetime(df['publication_date'], format='%d.%m.%Y', errors='coerce')
-    
-    # Очистка номера патента
-    df['n_patent'] = df['n_patent'].astype(str).str.strip()
-    
-    # Обработка столбца main_lab
-    if 'main_lab' in df.columns:
-        df['main_lab'] = df['main_lab'].fillna('Не указано')
-        df['main_lab'] = df['main_lab'].astype(str).str.strip()
-    
+
+    # Преобразование даты регистрации, если присутствует
+    if 'registration_date' in df.columns:
+        df['registration_date'] = pd.to_datetime(df['registration_date'], format='%d.%m.%Y', errors='coerce')
+
+    # Приведение codifier к верхнему регистру
+    if 'codifier' in df.columns:
+        df['codifier'] = df['codifier'].astype(str).str.strip().str.upper()
+
+    # Авторы как строка
+    if 'authors' in df.columns:
+        df['authors'] = df['authors'].astype(str)
+
+    # Подразделение
+    if 'subdivision' in df.columns:
+        df['subdivision'] = df['subdivision'].fillna('Не указано').astype(str).str.strip()
+
     return df
 
 # Боковая панель для загрузки файла
 st.sidebar.title("📁 Загрузка данных")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Загрузите CSV файл с патентами",
-    type=['csv'],
-    help="Файл должен содержать колонки: n, n_patent, link1, date, title, link2, publication, authors, main_lab"
+data_source = st.sidebar.radio(
+    "Источник данных",
+    ["Загрузить файл", "Выбрать из ./data"],
+    index=1
 )
 
-# Загрузка демо данных или файла пользователя
-if uploaded_file is not None:
-    df = load_data(uploaded_file)
-    if df is not None:
-        df = process_data(df)
+df = None
+
+if data_source == "Загрузить файл":
+    uploaded_file = st.sidebar.file_uploader(
+        "Загрузите CSV файл с патентами",
+        type=['csv'],
+        help="Файл должен содержать колонки: certificate_number, registration_date, title, title_link, publication_ref, authors, subdivision, codifier"
+    )
+    if uploaded_file is not None:
+        df_raw = load_data(uploaded_file)
+        if df_raw is not None:
+            df = process_data(df_raw)
+else:
+    data_dir = (Path(__file__).resolve().parent / '..' / 'data').resolve()
+    available_csv_paths = sorted([p for p in data_dir.glob('*.csv')])
+    if available_csv_paths:
+        selected_filename = st.sidebar.selectbox("Файл из ./data:", [p.name for p in available_csv_paths])
+        if selected_filename:
+            selected_path = data_dir / selected_filename
+            df_raw = load_data(str(selected_path))
+            if df_raw is not None:
+                df = process_data(df_raw)
+    else:
+        st.sidebar.info("В папке ./data нет CSV файлов")
 
 # Если данные загружены, показываем аналитику
 if 'df' in locals() and df is not None:
@@ -101,20 +134,39 @@ if 'df' in locals() and df is not None:
     # Фильтры в боковой панели
     st.sidebar.title("🔍 Фильтры")
     
-    # Фильтр по main_lab
-    if 'main_lab' in df.columns:
-        main_lab_values = ['Все'] + sorted(df['main_lab'].unique().tolist())
-        selected_main_lab = st.sidebar.selectbox(
-            "Выберите основную лабораторию:",
-            main_lab_values
+    # Фильтр по лаборатории/подразделению
+    if 'subdivision' in df.columns:
+        subdivision_values = ['Все'] + sorted(df['subdivision'].unique().tolist())
+        selected_subdivision = st.sidebar.selectbox(
+            "Выберите лабораторию/подразделение:",
+            subdivision_values
         )
     else:
-        selected_main_lab = 'Все'
-        st.sidebar.warning("Столбец 'main_lab' не найден в данных")
+        selected_subdivision = 'Все'
+        st.sidebar.warning("Столбец 'subdivision' не найден в данных")
+
+    # Фильтр по кодировке (IPC)
+    selected_codifiers = []
+    codifier_display_options = []
+    available_codifiers = []
+    if 'codifier' in df.columns:
+        available_codifiers = sorted([c for c in df['codifier'].dropna().astype(str).str.upper().unique().tolist() if c in CODIFIER_MAP])
+        codifier_display_options = [f"{c} - {CODIFIER_MAP.get(c, '')}" for c in available_codifiers]
+        default_codifiers = codifier_display_options
+        selected_codifier_display = st.sidebar.multiselect(
+            "Выберите раздел(ы) по кодировке (IPC):",
+            options=codifier_display_options,
+            default=default_codifiers
+        )
+        selected_codifiers = [s.split(' - ')[0] for s in selected_codifier_display]
     
-    # Фильтр по дате
-    min_date = df['date'].min()
-    max_date = df['date'].max()
+    # Фильтр по дате регистрации
+    if 'registration_date' in df.columns:
+        min_date = df['registration_date'].min()
+        max_date = df['registration_date'].max()
+    else:
+        min_date = pd.NaT
+        max_date = pd.NaT
     
     if not df.empty and pd.notna(min_date) and pd.notna(max_date):
         date_range = st.sidebar.date_input(
@@ -126,28 +178,41 @@ if 'df' in locals() and df is not None:
         
         # Применение фильтров
         df_filtered = df.copy()
+
+        # Фильтр по подразделению
+        if selected_subdivision != 'Все' and 'subdivision' in df_filtered.columns:
+            df_filtered = df_filtered[df_filtered['subdivision'] == selected_subdivision]
+        # Фильтр по кодировке
+        if 'codifier' in df_filtered.columns and available_codifiers:
+            if selected_codifiers and len(selected_codifiers) < len(available_codifiers):
+                df_filtered = df_filtered[df_filtered['codifier'].isin(selected_codifiers)]
         
-        # Фильтр по main_lab
-        if selected_main_lab != 'Все':
-            df_filtered = df_filtered[df_filtered['main_lab'] == selected_main_lab]
-        
-        # Фильтр по дате
-        if len(date_range) == 2:
-            mask = (df_filtered['date'] >= pd.to_datetime(date_range[0])) & (df_filtered['date'] <= pd.to_datetime(date_range[1]))
+        # Фильтр по дате регистрации
+        if len(date_range) == 2 and 'registration_date' in df_filtered.columns:
+            mask = (df_filtered['registration_date'] >= pd.to_datetime(date_range[0])) & (df_filtered['registration_date'] <= pd.to_datetime(date_range[1]))
             df_filtered = df_filtered[mask]
     else:
         df_filtered = df.copy()
-        # Применение только фильтра по main_lab
-        if selected_main_lab != 'Все':
-            df_filtered = df_filtered[df_filtered['main_lab'] == selected_main_lab]
+        # Применение только фильтра по подразделению
+        if selected_subdivision != 'Все' and 'subdivision' in df_filtered.columns:
+            df_filtered = df_filtered[df_filtered['subdivision'] == selected_subdivision]
+        # Фильтр по кодировке
+        if 'codifier' in df_filtered.columns and available_codifiers:
+            if selected_codifiers and len(selected_codifiers) < len(available_codifiers):
+                df_filtered = df_filtered[df_filtered['codifier'].isin(selected_codifiers)]
         st.sidebar.warning("Некорректные даты в данных")
     
     # Показываем активные фильтры
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Активные фильтры")
-    st.sidebar.write(f"**Лаборатория:** {selected_main_lab}")
+    st.sidebar.write(f"**Лаборатория:** {selected_subdivision}")
     if 'date_range' in locals() and len(date_range) == 2:
         st.sidebar.write(f"**Период:** {date_range[0]} - {date_range[1]}")
+    if 'codifier' in df.columns and available_codifiers:
+        if not selected_codifiers or len(selected_codifiers) == len(available_codifiers):
+            st.sidebar.write("**Кодировка (IPC):** Все")
+        else:
+            st.sidebar.write(f"**Кодировка (IPC):** {', '.join(selected_codifiers)}")
     st.sidebar.write(f"**Найдено записей:** {len(df_filtered)}")
     
     # Основная панель
@@ -163,20 +228,20 @@ if 'df' in locals() and df is not None:
             st.metric("Уникальных авторов", df_filtered['authors'].nunique())
         
         with col3:
-            if not df_filtered.empty and pd.notna(df_filtered['date'].min()):
-                st.metric("Первый патент", df_filtered['date'].min().strftime('%d.%m.%Y'))
+            if 'registration_date' in df_filtered.columns and not df_filtered.empty and pd.notna(df_filtered['registration_date'].min()):
+                st.metric("Первый патент", df_filtered['registration_date'].min().strftime('%d.%m.%Y'))
             else:
                 st.metric("Первый патент", "Н/Д")
-        
+
         with col4:
-            if not df_filtered.empty and pd.notna(df_filtered['date'].max()):
-                st.metric("Последний патент", df_filtered['date'].max().strftime('%d.%m.%Y'))
+            if 'registration_date' in df_filtered.columns and not df_filtered.empty and pd.notna(df_filtered['registration_date'].max()):
+                st.metric("Последний патент", df_filtered['registration_date'].max().strftime('%d.%m.%Y'))
             else:
                 st.metric("Последний патент", "Н/Д")
         
         # Показываем информацию о лаборатории если фильтр применен
-        if selected_main_lab != 'Все':
-            st.info(f"🔬 Отображены данные для лаборатории: **{selected_main_lab}**")
+        if 'selected_subdivision' in locals() and selected_subdivision != 'Все':
+            st.info(f"🔬 Отображены данные для лаборатории: **{selected_subdivision}**")
         
         # Карточки патентов с возможностью сворачивания
         st.subheader("🎯 Патенты")
@@ -189,21 +254,18 @@ if 'df' in locals() and df is not None:
             # Всегда показываем первые несколько патентов
             for i, (_, row) in enumerate(df_filtered.head(patents_to_show_initially).iterrows()):
                 with st.container():
-                    date_str = row['date'].strftime('%d.%m.%Y') if pd.notna(row['date']) else "Н/Д"
-                    main_lab_info = f"<p><strong>Основная лаборатория:</strong> {row['main_lab']}</p>" if 'main_lab' in row else ""
+                    date_str = row['registration_date'].strftime('%d.%m.%Y') if ('registration_date' in row and pd.notna(row['registration_date'])) else "Н/Д"
+                    main_lab_info = f"<p><strong>Лаборатория:</strong> {row['subdivision']}</p>" if 'subdivision' in row else ""
                     
                     st.markdown(f"""
                     <div class="patent-card">
                         <h4>{row['title']}</h4>
-                        <p><strong>Номер патента:</strong> {row['n_patent']}</p>
-                        <p><strong>Дата подачи:</strong> {date_str}</p>
-                        <p><strong>Публикация:</strong> {row['publication']}</p>
+                        <p><strong>Номер:</strong> {row.get('certificate_number', '')}</p>
+                        <p><strong>Дата регистрации:</strong> {date_str}</p>
+                        <p><strong>Публикация/ссылка:</strong> {row.get('publication_ref', '')}</p>
                         {main_lab_info}
                         <p><strong>Авторы:</strong> {row['authors']}</p>
-                        <p>
-                            <a href="{row['link1']}" target="_blank">🔗 Ссылка на патент</a> | 
-                            <a href="{row['link2']}" target="_blank">📄 Документ PDF</a>
-                        </p>
+                        <p>{f'<a href="{row["title_link"]}" target="_blank">📄 Документ PDF</a>' if ('title_link' in row and str(row['title_link']).strip()) else ''}</p>
                     </div>
                     """, unsafe_allow_html=True)
             
@@ -213,21 +275,18 @@ if 'df' in locals() and df is not None:
                     # Показываем оставшиеся патенты
                     for i, (_, row) in enumerate(df_filtered.iloc[patents_to_show_initially:].iterrows()):
                         with st.container():
-                            date_str = row['date'].strftime('%d.%m.%Y') if pd.notna(row['date']) else "Н/Д"
-                            main_lab_info = f"<p><strong>Основная лаборатория:</strong> {row['main_lab']}</p>" if 'main_lab' in row else ""
+                            date_str = row['registration_date'].strftime('%d.%m.%Y') if ('registration_date' in row and pd.notna(row['registration_date'])) else "Н/Д"
+                            main_lab_info = f"<p><strong>Лаборатория:</strong> {row['subdivision']}</p>" if 'subdivision' in row else ""
                             
                             st.markdown(f"""
                             <div class="patent-card">
                                 <h4>{row['title']}</h4>
-                                <p><strong>Номер патента:</strong> {row['n_patent']}</p>
-                                <p><strong>Дата подачи:</strong> {date_str}</p>
-                                <p><strong>Публикация:</strong> {row['publication']}</p>
+                                <p><strong>Номер:</strong> {row.get('certificate_number', '')}</p>
+                                <p><strong>Дата регистрации:</strong> {date_str}</p>
+                                <p><strong>Публикация/ссылка:</strong> {row.get('publication_ref', '')}</p>
                                 {main_lab_info}
                                 <p><strong>Авторы:</strong> {row['authors']}</p>
-                                <p>
-                                    <a href="{row['link1']}" target="_blank">🔗 Ссылка на патент</a> | 
-                                    <a href="{row['link2']}" target="_blank">📄 Документ PDF</a>
-                                </p>
+                                <p>{f'<a href="{row["title_link"]}" target="_blank">📄 Документ PDF</a>' if ('title_link' in row and str(row['title_link']).strip()) else ''}</p>
                             </div>
                             """, unsafe_allow_html=True)
         else:
@@ -240,19 +299,9 @@ if 'df' in locals() and df is not None:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # График временной шкалы
-                    if not df_filtered.empty and pd.notna(df_filtered['date']).any() and pd.notna(df_filtered['publication_date']).any():
-                        fig1 = px.timeline(df_filtered, x_start='date', x_end='publication_date', y='n_patent',
-                                        title='Временная шкала патентов',
-                                        labels={'n_patent': 'Номер патента', 'date': 'Дата подачи'})
-                        fig1.update_yaxes(autorange="reversed")
-                        st.plotly_chart(fig1, use_container_width=True)
-                    else:
-                        st.info("Недостаточно данных для построения временной шкалы")
-                    
                     # Круговая диаграмма по месяцам
-                    if not df_filtered.empty and pd.notna(df_filtered['date']).any():
-                        df_filtered['month'] = df_filtered['date'].dt.month
+                    if 'registration_date' in df_filtered.columns and not df_filtered.empty and pd.notna(df_filtered['registration_date']).any():
+                        df_filtered['month'] = df_filtered['registration_date'].dt.month
                         monthly_counts = df_filtered['month'].value_counts().sort_index()  # Сортировка по месяцам: 1, 2, ..., 12
 
                         if not monthly_counts.empty:
@@ -271,15 +320,15 @@ if 'df' in locals() and df is not None:
                 
                 with col2:
                     # Гистограмма по датам
-                    if not df_filtered.empty and pd.notna(df_filtered['date']).any():
-                        fig3 = px.histogram(df_filtered, x='date', title='Распределение патентов по датам подачи',
-                                        labels={'date': 'Дата подачи', 'count': 'Количество патентов'})
+                    if 'registration_date' in df_filtered.columns and not df_filtered.empty and pd.notna(df_filtered['registration_date']).any():
+                        fig3 = px.histogram(df_filtered, x='registration_date', title='Распределение патентов по датам регистрации',
+                                        labels={'registration_date': 'Дата регистрации', 'count': 'Количество патентов'})
                         st.plotly_chart(fig3, use_container_width=True)
                     
                     # Heatmap активности
-                    if not df_filtered.empty and pd.notna(df_filtered['date']).any():
-                        df_filtered['year'] = df_filtered['date'].dt.year
-                        df_filtered['month_num'] = df_filtered['date'].dt.month
+                    if 'registration_date' in df_filtered.columns and not df_filtered.empty and pd.notna(df_filtered['registration_date']).any():
+                        df_filtered['year'] = df_filtered['registration_date'].dt.year
+                        df_filtered['month_num'] = df_filtered['registration_date'].dt.month
                         heatmap_data = df_filtered.groupby(['year', 'month_num']).size().unstack(fill_value=0)
                         if not heatmap_data.empty:
                             fig4 = px.imshow(heatmap_data, title='Тепловая карта активности по месяцам и годам',
@@ -303,13 +352,14 @@ if 'df' in locals() and df is not None:
         # Отображение таблицы
         if not filtered_df.empty:
             display_df = filtered_df.copy()
-            display_df['date'] = display_df['date'].dt.strftime('%d.%m.%Y')
-            display_df['publication_date'] = display_df['publication_date'].dt.strftime('%d.%m.%Y')
+            if 'registration_date' in display_df.columns:
+                display_df['registration_date'] = display_df['registration_date'].dt.strftime('%d.%m.%Y')
             
-            # Показываем все колонки кроме ссылок для удобства просмотра
-            columns_to_display = ['n_patent', 'title', 'date', 'publication', 'authors']
-            if 'main_lab' in display_df.columns:
-                columns_to_display.append('main_lab')
+            # Колонки для отображения
+            columns_to_display = []
+            for col in ['certificate_number', 'title', 'registration_date', 'publication_ref', 'authors', 'subdivision', 'codifier']:
+                if col in display_df.columns:
+                    columns_to_display.append(col)
             
             st.dataframe(
                 display_df[columns_to_display],
@@ -368,9 +418,9 @@ if 'df' in locals() and df is not None:
                     author_patents = df_filtered[df_filtered['authors'].str.contains(selected_author, na=False)]
                     st.write(f"**Патенты автора {selected_author}:**")
                     for _, patent in author_patents.iterrows():
-                        date_str = patent['date'].strftime('%d.%m.%Y') if pd.notna(patent['date']) else "Н/Д"
-                        main_lab_info = f" ({patent['main_lab']})" if 'main_lab' in patent else ""
-                        st.write(f"- {patent['title']} ({date_str}){main_lab_info}")
+                        date_str = patent['registration_date'].strftime('%d.%m.%Y') if ('registration_date' in patent and pd.notna(patent['registration_date'])) else "Н/Д"
+                        lab_info = f" ({patent['subdivision']})" if 'subdivision' in patent else ""
+                        st.write(f"- {patent['title']} ({date_str}){lab_info}")
             else:
                 st.info("Нет данных об авторах")
         else:
@@ -379,9 +429,9 @@ if 'df' in locals() and df is not None:
     with tab5:
         st.subheader("🏢 Анализ по лабораториям")
         
-        if 'main_lab' in df.columns:
+        if 'subdivision' in df.columns:
             # Статистика по лабораториям
-            lab_stats = df['main_lab'].value_counts()
+            lab_stats = df['subdivision'].value_counts()
             
             col1, col2 = st.columns(2)
             
@@ -402,9 +452,14 @@ if 'df' in locals() and df is not None:
             # Детальная статистика по лабораториям
             st.subheader("Детальная статистика по лабораториям")
             for lab in lab_stats.index:
-                lab_data = df[df['main_lab'] == lab]
+                lab_data = df[df['subdivision'] == lab]
                 with st.expander(f"🔬 {lab} ({len(lab_data)} патентов)"):
-                    st.write(f"**Период активности:** {lab_data['date'].min().strftime('%d.%m.%Y')} - {lab_data['date'].max().strftime('%d.%m.%Y')}")
+                    if 'registration_date' in lab_data.columns:
+                        min_d = lab_data['registration_date'].min()
+                        max_d = lab_data['registration_date'].max()
+                        min_s = min_d.strftime('%d.%m.%Y') if pd.notna(min_d) else 'Н/Д'
+                        max_s = max_d.strftime('%d.%m.%Y') if pd.notna(max_d) else 'Н/Д'
+                        st.write(f"**Период активности:** {min_s} - {max_s}")
                     st.write(f"**Уникальных авторов:** {lab_data['authors'].nunique()}")
                     
                     # Топ авторов в лаборатории
@@ -420,7 +475,7 @@ if 'df' in locals() and df is not None:
                         for author, count in top_lab_authors:
                             st.write(f"- {author} ({count} патентов)")
         else:
-            st.warning("Столбец 'main_lab' не найден в данных")
+            st.warning("Столбец 'subdivision' не найден в данных")
 
     # Ландшафт в нижней части
     st.markdown("---")
@@ -443,9 +498,9 @@ if 'df' in locals() and df is not None:
             # Создание искусственного ландшафта на основе данных
             for i, (author, count) in enumerate(author_counts_landscape.most_common(5)):
                 author_patents = df_filtered[df_filtered['authors'].str.contains(author, na=False)]
-                
+
                 fig_landscape.add_trace(go.Scatter(
-                    x=author_patents['date'],
+                    x=author_patents['registration_date'] if 'registration_date' in author_patents.columns else None,
                     y=[i] * len(author_patents),
                     mode='markers',
                     name=author,
@@ -456,7 +511,7 @@ if 'df' in locals() and df is not None:
 
             fig_landscape.update_layout(
                 title='Ландшафт патентной активности по топ-5 авторам',
-                xaxis_title='Дата подачи заявки',
+                xaxis_title='Дата регистрации',
                 yaxis_title='Авторы',
                 showlegend=True,
                 height=400
@@ -476,7 +531,7 @@ st.sidebar.markdown("---")
 st.sidebar.info("""
 **Инструкция по использованию:**
 1. Загрузите CSV файл через боковую панель
-2. Файл должен содержать колонки: n, n_patent, link1, date, title, link2, publication, authors, main_lab
+2. Файл должен содержать колонки: certificate_number, registration_date, title, title_link, publication_ref, authors, subdivision, codifier
 3. Используйте фильтры для настройки отображения
 4. Переключайтесь между вкладками для разного типа анализа
 """)
